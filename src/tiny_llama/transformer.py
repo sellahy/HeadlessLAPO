@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from flash_attn import flash_attn_func
+# from flash_attn import flash_attn_func
 from lightning_utilities.core.imports import RequirementCache
 from xformers.ops import SwiGLU
 
@@ -158,20 +158,23 @@ class CausalSelfAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
     ):
         scale = 1.0 / math.sqrt(self.config.head_size)
-        if (
-            FlashAttention2Available
-            and mask is None
-            and q.device.type == "cuda"
-            and q.dtype in (torch.float16, torch.bfloat16)
-        ):
-            return flash_attn_func(
-                q,
-                k,
-                v,
-                dropout_p=self.config.attention_dropout,
-                softmax_scale=scale,
-                causal=True,
-            )
+        # if (
+        #     FlashAttention2Available
+        #     and mask is None
+        #     and q.device.type == "cuda"
+        #     and q.dtype in (torch.float16, torch.bfloat16)
+        # ):
+        #     return flash_attn_func(
+        #         q,
+        #         k,
+        #         v,
+        #         dropout_p=self.config.attention_dropout,
+        #         softmax_scale=scale,
+        #         causal=True,
+        #     )
+
+        # having trouble installing flash attention and limits GPU options, so use pytorch option
+        return nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.config.attention_dropout, is_causal=True, scale=scale)
 
 
 class GptNeoxMLP(nn.Module):
