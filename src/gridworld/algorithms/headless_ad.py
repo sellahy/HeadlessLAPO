@@ -31,6 +31,8 @@ from src.utils.wandb_logging import log_in_context, log_list, log_raw_regrets
 if False:
     envs
 
+import pdb
+import sys
 
 @dataclass
 class Config:
@@ -480,7 +482,28 @@ def train(config: Config):
 
     wandb_define_metrics()
 
-    (train_acts, train_goals), eval_envs = make_envs(config=config)
+    # load data if available, because takes a long time to generate
+    print("loading data is available")
+    par_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if os.path.isfile(os.path.join(par_dir, "train_acts.pkl")) and \
+       os.path.isfile(os.path.join(par_dir, "train_goals.pkl")) and \
+       os.path.isfile(os.path.join(par_dir, "eval_envs.pkl")):
+        print("train_acts, train_goals, and eval_envs pkls found, so using")
+        with open(os.path.join(par_dir, "train_acts.pkl"), "rb") as file:
+            train_acts = pickle.load(file)
+        with open(os.path.join(par_dir, "train_goals.pkl"), "rb") as file:
+            train_goals = pickle.load(file)
+        with open(os.path.join(par_dir, "eval_envs.pkl"), "rb") as file:
+            eval_envs = pickle.load(file)
+    else:
+        print("train_acts, train_goals, and eval_envs pkls not found, so generating")
+        (train_acts, train_goals), eval_envs = make_envs(config=config)
+        with open(os.path.join(par_dir, "train_acts.pkl"),  "wb") as file:
+            pickle.dump(train_acts, file)
+        with open(os.path.join(par_dir, "train_goals.pkl"), "wb") as file:
+            pickle.dump(train_goals, file)
+        with open(os.path.join(par_dir, "eval_envs.pkl"),   "wb") as file:
+            pickle.dump(eval_envs, file)
     generate_dataset(config=config, actions=train_acts, goals=train_goals)
     q_learning_scores = base_algo_scores(config=config, envs=eval_envs)
     for key, value in q_learning_scores.items():
