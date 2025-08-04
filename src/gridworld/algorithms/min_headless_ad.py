@@ -135,248 +135,123 @@ def make_env(env_name: str, acts: np.ndarray, goal: np.ndarray, act_seq_len: int
 
     return helper
 
+# stripped down train() to just make a prediction
+config = Config()
 
-@torch.no_grad()
-def evaluate_in_context(
-    config: Config,
-    model: Model,
-    acts: np.ndarray,
-    goals: np.ndarray,
-):
-    model.eval()
-    # Create env
-    vec_env = SyncVectorEnv(
-        [
-            make_env(
-                env_name=config.env_name,
-                acts=a,
-                goal=g,
-                act_seq_len=config.action_seq_len,
-            )
-            for (a, g) in zip(acts, goals)
-        ]
-    )
-    init_state, _ = vec_env.reset(seed=config.eval_seed)
-
-    # reassign some variables
-    num_envs = vec_env.num_envs
-
-    # Create action embeddings
-    act_mapper = ActionMapper(
-        action_embed_dim=config.token_embed_dim,
-        num_actions=acts.shape[1],
-        device=config.device,
-        sim_measure=config.sim_measure,
-        rand_emb_type=config.rand_emb_type,
-    )
-    act_mapper.regenerate(seed=config.eval_seed)
-
-    # Create context windows for storing the interaction histories
-    states = torch.zeros(
-        (config.seq_len, num_envs), dtype=torch.long, device=config.device
-    )
-    states[-1, :] = torch.from_numpy(init_state).to(config.device).type(torch.long)
-    actions = torch.zeros(
-        (config.seq_len, num_envs, config.token_embed_dim),
-        dtype=torch.float32,
-        device=config.device,
-    )
-    rewards = torch.zeros(
-        (config.seq_len, num_envs), dtype=torch.long, device=config.device
-    )
-    num_actions_per_env = torch.full(
-        size=(num_envs,), fill_value=acts.shape[1], device=config.device
-    )
-
-    actions_list = act_mapper._get_action_map_as_context(
-        num_actions_per_env=num_actions_per_env
-    )
-
-    tried_action_inds = []
-    # create a list for accumulation of regrets
-    all_returns = [[] for _ in range(num_envs)]
-    all_lengths = [[] for _ in range(num_envs)]
-    current_lengths = np.zeros(num_envs)
-    current_returns = np.zeros(num_envs)
-    entropies = []
-
-    num_dones = np.zeros(num_envs, dtype=np.int32)
-    tried_action_sets = [list() for _ in range(num_envs)]
-    interm_tried_action_sets = [set() for _ in range(num_envs)]
-    for istep in tqdm(itertools.count(start=1), desc="Eval ..."):
-        inp = (
-            states.T[:, -istep:],
-            actions.transpose(0, 1)[:, -istep:],
-            rewards.T[:, -istep:],
-        )
-        # check for validity
-        assert (istep < config.seq_len and inp[0].shape[1] == istep) or (
-            istep >= config.seq_len and inp[0].shape[1] == config.seq_len
-        ), (
-            inp[0].shape[1],
-            istep,
-        )
-        # make prediction
-        pred = model(*inp, actions_list=actions_list)
-        pred = pred[:, -1]
-        print(f"pred is {pred}")
-        sys.exit()
-
-
-def wandb_define_metrics() -> None:
-    wandb.define_metric("data_gen/step")
-    wandb.define_metric("data_gen/*", step_metric="data_gen/step")
-
-    wandb.define_metric("final/step")
-    wandb.define_metric("final/*", step_metric="final/step")
-
-    wandb.define_metric("train/step")
-    wandb.define_metric("train/*", step_metric="train/step")
-    wandb.define_metric("times/step")
-    wandb.define_metric("times/*", step_metric="times/step")
-
-    wandb.define_metric("num_uniques/step")
-    wandb.define_metric("num_uniques/*", step_metric="num_uniques/step")
-    wandb.define_metric("returns/step")
-    wandb.define_metric("returns/*", step_metric="returns/step")
-
-    wandb.define_metric("tried/step")
-    wandb.define_metric("tried/*", step_metric="tried/step")
-
-
-def next_dataloader(dataloader: DataLoader):
-    while True:
-        for batch in dataloader:
-            yield batch
-
-
-def base_algo_scores(config: Config, envs: Dict[str, Tuple[np.ndarray, np.ndarray]]):
-    base_algo_final_returns = {}
-    with mp.Pool(processes=os.cpu_count()) as pool:
-        for key, (acts, goals) in envs.items():
-            returns, _ = solve_env(
-                config=config, pool=pool, goals=goals, actions=acts, savedir=None
-            )
-            final_return = returns.mean(0)[-1]
-
-            base_algo_final_returns[key] = final_return
-
-    return base_algo_final_returns
-
-
-def random_model_scores(
-    config: Config,
-    model_config: ModelConfig,
-    accelerator: Accelerator,
-    envs: Dict[str, Tuple[np.ndarray, np.ndarray]],
-):
-    real_num_in_context_episodes = config.num_in_context_episodes
-    config.num_in_context_episodes = 10
-    random_model = Model(
-        config=model_config,
-        n_token=config.token_embed_dim,
-        use_action_set_prompt=config.use_action_set_prompt,
-        action_seq_len=config.action_seq_len,
-        num_states=config.grid_size**2,
-    ).to(config.device)
-
-    random_model = accelerator.prepare(random_model)
-
-    returns = {}
-
-    for key, (acts, goals) in tqdm(envs.items()):
-        (returns[key], _, _, _, _) = evaluate_in_context(
-            config,
-            model=random_model,
-            acts=acts,
-            goals=goals,
-        )
-
-        returns[key] = returns[key].mean(0)[-1]
-
-    config.num_in_context_episodes = real_num_in_context_episodes
-    return returns
-
-
-@pyrallis.wrap()
-def train(config: Config):
-    # Clean up and then create directory
-    if os.path.exists(config.logs_dir):
-        shutil.rmtree(config.logs_dir)
-    os.makedirs(config.logs_dir)
-
-    # config.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    config.autocast_dtype = (
+config.autocast_dtype = (
         "bf16"
         if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
         else "fp16"
     )
-    accelerator = Accelerator(mixed_precision=config.autocast_dtype)
-    config.device = accelerator.device
+accelerator = Accelerator(mixed_precision=config.autocast_dtype)
+config.device = accelerator.device
 
-    wandb.init(
-        project=config.project,
-        group=config.group,
-        job_type=config.job_type,
-        name=config.name,
-        config=asdict(config),
-        save_code=True,
-    )
+(train_acts, train_goals), eval_envs = make_envs(config=config) # TODO: can I strip this down more? can I get rid of it? How will this need to change?
 
-    wandb_define_metrics()
+set_seed(seed=config.train_seed)
 
-    (train_acts, train_goals), eval_envs = make_envs(config=config)
-    generate_dataset(config=config, actions=train_acts, goals=train_goals)
-    q_learning_scores = base_algo_scores(config=config, envs=eval_envs)
-    for key, value in q_learning_scores.items():
-        wandb.log({f"q_learning/{key}": value})
+# model & optimizer & scheduler setup
+model_config = ModelConfig(
+    block_size=3 * config.seq_len + 5**config.action_seq_len,
+    n_layer=config.num_layers,
+    n_head=config.num_heads,
+    n_embd=config.d_model,
+    bias=config.layer_norm_bias,
+    rotary_percentage=config.rotary_percentage,
+    parallel_residual=config.parallel_residual,
+    shared_attention_norm=config.shared_attention_norm,
+    _norm_class=config._norm_class,
+    _mlp_class=config._mlp_class,
+    dropout=config.dropout,
+    attention_dropout=config.attention_dropout,
+)
 
-    set_seed(seed=config.train_seed)
+model = Model(
+    config=model_config,
+    n_token=config.token_embed_dim,
+    use_action_set_prompt=config.use_action_set_prompt,
+    action_seq_len=config.action_seq_len,
+    num_states=config.grid_size**2,
+).to(config.device)
 
-    dataset = SequenceDataset(
-        runs_path=config.learning_histories_path, seq_len=config.seq_len
-    )
-    shape0s = np.array(
-        [len(dataset._states), len(dataset._actions), len(dataset._rewards)]
-    )
-    assert np.all(shape0s == config.num_train_envs), (
-        shape0s,
-        config.num_train_envs,
-    )
-    dataloader = DataLoader(
-        dataset=dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        pin_memory=True,
-        num_workers=14,
-        persistent_workers=True,
-        drop_last=True,
-    )
+model = accelerator.prepare(model) # TODO: implement loading model
 
-    # model & optimizer & scheduler setup
-    model_config = ModelConfig(
-        block_size=3 * config.seq_len + 5**config.action_seq_len,
-        n_layer=config.num_layers,
-        n_head=config.num_heads,
-        n_embd=config.d_model,
-        bias=config.layer_norm_bias,
-        rotary_percentage=config.rotary_percentage,
-        parallel_residual=config.parallel_residual,
-        shared_attention_norm=config.shared_attention_norm,
-        _norm_class=config._norm_class,
-        _mlp_class=config._mlp_class,
-        dropout=config.dropout,
-        attention_dropout=config.attention_dropout,
-    )
+envs : Dict[str, Tuple[np.ndarray, np.ndarray]] = eval_envs
 
-    random_scores = random_model_scores(
-        config=config,
-        model_config=model_config,
-        accelerator=accelerator,
-        envs=eval_envs,
-    )
+key, (acts, goals) = list(envs.items())[0]
 
+model.eval()
 
-if __name__ == "__main__":
-    train()
+#create env
+vec_env = SyncVectorEnv( #TODO: How will this need to change?
+    [
+        make_env(
+            env_name=config.env_name,
+            acts=a,
+            goal=g,
+            act_seq_len=config.action_seq_len,
+        )
+        for (a, g) in zip(acts, goals)
+    ]
+)
+init_state, _ = vec_env.reset(seed=config.eval_seed)
+
+# reassign some variables
+num_envs = vec_env.num_envs
+
+# Create action embeddings
+act_mapper = ActionMapper(
+    action_embed_dim=config.token_embed_dim,
+    num_actions=acts.shape[1],
+    device=config.device,
+    sim_measure=config.sim_measure,
+    rand_emb_type=config.rand_emb_type,
+)
+act_mapper.regenerate(seed=config.eval_seed)
+
+# Create context windows for storing the interaction histories
+states = torch.zeros(
+    (config.seq_len, num_envs), dtype=torch.long, device=config.device
+)
+states[-1, :] = torch.from_numpy(init_state).to(config.device).type(torch.long)
+actions = torch.zeros(
+    (config.seq_len, num_envs, config.token_embed_dim),
+    dtype=torch.float32,
+    device=config.device,
+)
+rewards = torch.zeros(
+    (config.seq_len, num_envs), dtype=torch.long, device=config.device
+)
+num_actions_per_env = torch.full(
+    size=(num_envs,), fill_value=acts.shape[1], device=config.device
+)
+
+actions_list = act_mapper._get_action_map_as_context(
+    num_actions_per_env=num_actions_per_env
+)
+
+istep = 1 # TODO: how will this need to change?
+
+inp = (
+    states.T[:, -istep:],
+    actions.transpose(0, 1)[:, -istep:],
+    rewards.T[:, -istep:],
+)
+# check for validity
+assert (istep < config.seq_len and inp[0].shape[1] == istep) or (
+    istep >= config.seq_len and inp[0].shape[1] == config.seq_len
+), (
+    inp[0].shape[1],
+    istep,
+)
+# make prediction
+pred = model(*inp, actions_list=actions_list)
+pred = pred[:, -1]
+# map predictions to action indices
+action_sample, action_mode, entropy = act_mapper.get_action(
+    pred.unsqueeze(1),
+    num_actions_per_env=num_actions_per_env,
+    with_entropy=True,
+)
+
+# FIXME: this script will produce predictions, but I still need to compare to some policy
