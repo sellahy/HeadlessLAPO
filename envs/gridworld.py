@@ -121,14 +121,14 @@ class GridWorld(gym.Env):
     ):
         self.action_seq_len = action_seq_len
         # 5 is amount of atomic actions
-        self.action_sequences = get_action_sequences(5, self.action_seq_len)
+        self.action_sequences = get_action_sequences(5, self.action_seq_len) # this is a nd.array of tuples of 0, 1, 2, 3, or 4. The length of each tuple is the seq_len and each entry in the tuple is an index corresponding to the actions described in action_to_direction.
         self.action_sequences = self.action_sequences[available_actions]
 
         self.size = size
         self.observation_space = spaces.Discrete(self.size**2)
         self.action_space = spaces.Discrete(len(available_actions))
 
-        self.action_to_direction = np.array([[0, 0], [-1, 0], [0, 1], [1, 0], [0, -1]])
+        self.action_to_direction = np.array([[0, 0], [-1, 0], [0, 1], [1, 0], [0, -1]]) # for action sequences of length 1, index 0 is no-op, 1 is left, 2 is up, 3 is right, 4 is down
 
         # the agent will start here
         self.center_pos = (self.size // 2, self.size // 2)
