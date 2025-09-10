@@ -117,7 +117,11 @@ class CausalSelfAttention(nn.Module):
 
         # apply rope in fp32 significanly stabalize training
         # fused rope expect (batch_size, seqlen, nheads, headdim)
+        # q = apply_rotary_emb_func(q, cos, sin, False, True)
+        cos = cos.to(q.dtype)
+        sin = sin.to(q.dtype)
         q = apply_rotary_emb_func(q, cos, sin, False, True)
+
         k = apply_rotary_emb_func(k, cos, sin, False, True)
 
         # n_elem = int(self.config.rotary_percentage * self.config.head_size)

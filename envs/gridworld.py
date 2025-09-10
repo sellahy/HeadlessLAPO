@@ -156,10 +156,18 @@ class GridWorld(gym.Env):
         return np.array(divmod(state, self.size))
 
     def reset(self, seed=None, options=None):
-        super().reset(seed=seed, options=options)
-        self.agent_pos = np.array(self.center_pos, dtype=np.float32)
+        super().reset(seed=seed)
+        if options is not None and "start_pos" in options:
+            start = np.asarray(options["start_pos"], dtype=np.int64)
+        else:
+            start = self.np_random.integers(0, self.size, size=2, dtype=np.int64)
+            while np.array_equal(start, self.goal_pos.astype(np.int64)):
+                start = self.np_random.integers(0, self.size, size=2, dtype=np.int64)
 
-        return pos_to_state(self.agent_pos, self.size), {}
+        self.agent_pos = start.astype(np.int64)
+        obs = int(self.agent_pos[0] * self.size + self.agent_pos[1])
+        return obs, {"start_pos": self.agent_pos.copy(), "goal_pos": self.goal_pos.copy()}
+
 
     def _single_step(self, action):
         """

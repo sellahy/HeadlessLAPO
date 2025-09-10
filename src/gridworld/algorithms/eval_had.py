@@ -11,7 +11,12 @@ from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from src.action_mapper import ActionMapper
 import pdb
-
+import matplotlib
+matplotlib.use("Agg")  # headless-safe
+import matplotlib.pyplot as plt
+from typing import Union
+import numpy as np, imageio.v2 as imageio, matplotlib.pyplot as plt
+from PIL import Image
 
 # ---- Utils begin ----
 
@@ -51,18 +56,23 @@ def renderable_array_2_goal_and_agent_pos(renderable_array : np.ndarray) -> (np.
     :return size: int describing width and height of the gridworld environment
 
     """
-    assert len(renderable_array.shape == 3), f"expected renderable_array to have 3 dimensions, got {renderable_array.shape}"
+    assert len(renderable_array.shape) == 3, f"expected renderable_array to have 3 dimensions, got {renderable_array.shape}"
     assert renderable_array.shape[0] == renderable_array.shape[1], f"expected grid of renderable_array to be square, but has shape {renderable_array.shape[0:2]}"
     assert renderable_array.shape[2] == 3, f"expected last dimension of renderable_array to be color channel with size 3, but got size {renderable_array.shape[2]}"
     # TODO: assert tha entries are ints with range 0 - 255
+
+    assert np.issubdtype(renderable_array.dtype, np.integer), \
+        f"expected integer dtype, got {renderable_array.dtype}"
+    assert renderable_array.min() >= 0 and renderable_array.max() <= 255, \
+        f"expected values in range [0, 255], got min={renderable_array.min()}, max={renderable_array.max()}"
 
     # renderable_array has shape (size, size, 3). First dim is x coord, 2nd is y coord, 3rd is rgb value
     # goal_pos is position with red color. That is, (x,y) coord with rgb value == (255, 0, 0)
 
     goal_col : np.array = np.array([255,0,0])
-    goal_pos : np.array = null
+    goal_pos : np.array = None
     agent_col : np.array = np.array([0,255,0])
-    agent_pos : np.array = null
+    agent_pos : np.array = None
     size : int = renderable_array.shape[0]
 
     for i in range(renderable_array.shape[0]):
@@ -71,35 +81,84 @@ def renderable_array_2_goal_and_agent_pos(renderable_array : np.ndarray) -> (np.
                 goal_pos = np.array([i,j])
             if (renderable_array[i,j] == agent_col).all():
                 agent_pos = np.array([i,j])
-            if agent_pos != null and goal_pos != null:
+            if agent_pos != None and goal_pos != None:
                 break
 
-    assert agent_pos != null, "no agent position was found in renderable_array"
-    assert goal_pos != null, "no goal position was found in renderable_array"
+    assert agent_pos != None, "no agent position was found in renderable_array"
+    assert goal_pos != None, "no goal position was found in renderable_array"
     return goal_pos, agent_pos, size
 
-def save_trajectory(agent_positions : list[np.ndarray], goal_pos : np.ndarray, size : int) -> None: # FIXME: need to readjust body now that agent_positions arg is an array of np.ndarrays
+
+def save_trajectory(
+    agent_positions: Union[list[np.ndarray], np.ndarray],
+    goal_pos: np.ndarray,
+    size: int,
+    save_path: str = "eval_trajs/eval_traj.npy",
+    save_png: bool = True,
+):
     """
-    save trajectory represented as a dictionary. 
-    
-    agent_positions is required to have shape (num_timesteps, 2). The first dimension
-    corresponds to the timestep of the agent position, the second dimension correponding
-    to the position of the agent at a particular timestep. The first entry of the entry 
-    at timestep t corresponds to the x coord of the agent at t, the second to the y 
-    coord of the agent at t.
-    
-    goal_pos is required to have shape (2,). That is, it should have two entries, the first corresponding to the x coord of the goal, the second to the y coord of the goal
+    Save trajectory as a dictionary and (optionally) a PNG visualization.
 
-    the size is the width and height of the gridworld environment.
+    agent_positions: list of np.ndarray (each (2,)) or np.ndarray of shape (T,2)
+    goal_pos: np.ndarray shape (2,)
+    size: int grid width/height
+    save_path: output .npy path (dictionary with agent_positions, goal_pos, size, num_timesteps)
+    save_png: also save a PNG next to the .npy
     """
-    # assert len(agent_positions.shape) == 2, f"expected action_positions to be 2 dimensional, but found {len(agent_positions.shape)} dimensions"
-    # assert agent_positions.shape[1] == 2, f"expected 2nd dim to have size 2, but has size {agent_positions.shape[1]}"
+    # --- normalize agent_positions to (T,2) array ---
+    if isinstance(agent_positions, np.ndarray):
+        traj = agent_positions
+    else:
+        traj = np.vstack(agent_positions)
+    assert traj.ndim == 2 and traj.shape[1] == 2, f"expected (T,2), got {traj.shape}"
 
-    # num_timesteps : int = agent_positions.shape[0]
+    # ints required
+    if not np.issubdtype(traj.dtype, np.integer):
+        traj = traj.astype(np.int32)
+    assert isinstance(goal_pos, np.ndarray) and goal_pos.shape == (2,), f"goal_pos must be shape (2,), got {getattr(goal_pos,'shape',None)}"
+    if not np.issubdtype(goal_pos.dtype, np.integer):
+        goal_pos = goal_pos.astype(np.int32)
 
-    # return {"agent_positions" : agent_positions, "goal_pos" : goal_pos, "size" : size, "num_timesteps" : num_timesteps}
+    # --- basic checks ---
+    assert isinstance(size, int) and size > 0, f"size must be positive int, got {size}"
+    # bounds
+    if (traj < 0).any() or (traj >= size).any():
+        raise AssertionError(f"agent_positions contains coords outside [0,{size-1}]")
+    if (goal_pos < 0).any() or (goal_pos >= size).any():
+        raise AssertionError(f"goal_pos {tuple(goal_pos)} outside [0,{size-1}]")
 
-    np.save(os.path, np.vstack(agent_positions))
+    num_timesteps: int = traj.shape[0]
+    payload = {
+        "agent_positions": traj,       # (T,2) int
+        "goal_pos": goal_pos,          # (2,) int
+        "size": int(size),
+        "num_timesteps": int(num_timesteps),
+    }
+
+    # --- save .npy ---
+    out_path = Path(save_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(out_path, payload)
+    print(f"Saved trajectory dict -> {out_path} (T={num_timesteps})")
+
+    # --- optional PNG ---
+    if save_png:
+        png_path = out_path.with_suffix(".png")
+        fig, ax = plt.subplots(figsize=(4.8, 4.8))
+        x, y = traj[:, 0], traj[:, 1]  # row, col
+        ax.plot(y, x, marker='o', linewidth=1.5, markersize=4)
+        ax.scatter(y[0],  x[0],  s=90, label="Start")
+        ax.scatter(y[-1], x[-1], s=90, label="End")
+        ax.scatter(int(goal_pos[1]), int(goal_pos[0]), s=120, marker='*', label="Goal")
+        ax.set_xticks(range(size)); ax.set_yticks(range(size))
+        ax.grid(True, linestyle='--', linewidth=0.5)
+        ax.set_xlim(-0.5, size-0.5); ax.set_ylim(-0.5, size-0.5)
+        ax.invert_yaxis()
+        ax.set_title("Agent Trajectory"); ax.legend(loc='upper right', fontsize=8)
+        fig.tight_layout(); fig.savefig(png_path, dpi=160); plt.close(fig)
+        print(f"Saved trajectory plot -> {png_path}")
+    return payload
+
 
 def get_model(config):
     # model setup
@@ -203,10 +262,22 @@ class Config:
     train_frac_acts: float = 0.4
     train_frac_goals: float = 0.85
     grid_size: int = 9
-    num_episodes: int = 200
+    num_episodes: int = 56
     q_learning_lr: float = 0.9933
     q_learning_discount: float = 0.6238
     check_cached: bool = False
+
+
+    # Metrics init 
+    steps = 0
+    total_reward = 0.0
+    min_reward = float("inf")
+    max_reward = float("-inf")
+    total_regret = 0.0   # sum of (baseline_best - actual_reward)
+    def manhattan(a, b):
+        # a, b are (row, col)
+        return abs(int(a[0]) - int(b[0])) + abs(int(a[1]) - int(b[1]))
+
 
     action_space_type: str = "for_headless"
     num_in_context_episodes: Optional[int] = None
@@ -219,17 +290,18 @@ class Config:
 
         self.eval_seed = 1000 + self.train_seed
 
-# the goal position. If None, will be chosen randomly.
-goal_pos = np.array([2, 2])
-# goal_pos = None
 
+# the goal position. If None, will be chosen randomly.
+goal_pos = np.array([0, 8])
+# goal_pos = None
+frames = []  # will be filled with frames for visualization
 # actions in the env are sequences of left, right, up, down, and do nothing. action_seq_len determines how many actions in a row occur
 # the amount of atomic actions constituting the action sequence.
 action_seq_len = 3
 # indices of action sequences that the environment will use.
 # for action_seq_len 2, index 0 corresponds to [no-op, no-op], index 1 corresponds to [no-op, down], ... index 24 corresponds to [left, left]
 # using all indices from 0 - 5^seq_len uses all actions
-available_actions = np.arange(5**action_seq_len) 
+available_actions = np.arange(5**action_seq_len)
 
 # Create environment
 env = gym.make(
@@ -296,71 +368,186 @@ actions_list = act_mapper._get_action_map_as_context( # in evaluate in context, 
 # trajectory dictionary 
 traj : list = [env.agent_pos] # start with the inital position recorded
 
-breakpoint()
-    
-for istep in range(1, 10):
-    """states.shape
-torch.Size([64, 100]), presumbly 2nd index is config.seq_len
-<class 'torch.Tensor'>
-states is integers betwwen 0 and 80, presumably corresponding to indices of tiles of a 9 x 9 grid
-(Pdb) actions.shape
-torch.Size([64, 100])
-<class 'torch.Tensor'>
-actions is integers between 0 and 49, presumably corresponding to indices of 3 consecutive actions. The tensor presumably contains indices from a random selection of actions
-(Pdb) rewards.shape
-torch.Size([64, 100])
-<class 'torch.Tensor'>
-rewards is 1's and 0's, presumably cooresponding to ends of episodes
 
-"""
-    inp = (
-    states.T[:, -istep:], # for each batch, gets the previous states of the agent. first it's many rows of [40] (one row for each batch), then it's many rows of [next_state_index, 40]
-    actions.transpose(0, 1)[:, -istep:], # for each batch, gets the previous actions taken by the agent. First, it's many rows of [0 vector], then it's many rows of [0 vector, 0 vector]
-    rewards.T[:, -istep:], # for each batch, gets the previous rewards of the agent. first it's many rows of [0] (one row for each batch), then it's many rows of [next_reward, 0]
-    )
-    # check for validity
-    assert (istep < Config.seq_len and inp[0].shape[1] == istep) or (
-        istep >= Config.seq_len and inp[0].shape[1] == Config.seq_len
-    ), (
-        inp[0].shape[1],
-        istep,
-    )
-    
-    # make prediction
-    pred = model(*inp, actions_list=actions_list) # in evaluate in context, this is a torch.Tensor with shape (100, 1, 128). I assume this is (batch size, 1, embed dim)
-    pred = pred[:, -1] # this gets rid of the 1 dim, so shape is now (100, 128) - 1 action embed prediction per batch
-    
+def decode_action(action_idx, action_seq_len=3):
+    """Convert action index to sequence of moves"""
+    moves = []
+    temp = action_idx
+    for _ in range(action_seq_len):
+        moves.append(temp % 5)
+        temp //= 5
+    return moves[::-1]
+
+ep_returns = []
+# === before the eval loop ===
+out_dir = Path(Config.save_dir)
+out_dir.mkdir(parents=True, exist_ok=True)
+
+for ep in range(Config.num_episodes):
+
+  # episode number
+  print(f"\n=== Episode {ep+1}/{Config.num_episodes} ===")
+    # fresh reset each episode (seed changes so episodes differ)
+  observation, info = env.reset(seed=Config.eval_seed + ep)
+
+  # (re)initialize rolling histories
+  # states.zero_(); actions.zero_(); rewards.zero_()
+  states[-1, 0] = torch.as_tensor(observation, device=Config.device, dtype=torch.long)
+  traj = [env.agent_pos.copy()]
+  istep = 0
+  ep_return = 0.0
 
 
-    action = env.action_space.sample() # random actions, not even using policy
-    # TODO: get model to pick action. QUESTION: How to know if actions are better than random? probably need to limit duration of episode to size of grid and compare to random - expect less repeatition of actions by trained policy compared to random policy. Gridworld doesn't seem like a good showcase of Headless-AD's ability to reason about actions in context
 
-    # want to measure avg return, avg regret, avg total regret, avg reward, avg min reward, avg max reward
+  while True:
+      istep += 1
 
-    # step (transition) through the environment with the action
-    # receiving the next observation, reward and if the episode has terminated or truncated
-    observation, reward, terminated, truncated, info = env.step(action)
+      # Prepare input sequences
+      # inp = (
+      #     states.T[:, -min(istep, Config.seq_len):],
+      #     actions.transpose(0, 1)[:, -min(istep, Config.seq_len):],
+      #     rewards.T[:, -min(istep, Config.seq_len):]
+      # )
 
-    # record step
-    traj.append(env.agent_pos)
+      inp = (
+      states.T[:, -istep:], # for each batch, gets the previous states of the agent. first it's many rows of [40] (one row for each batch), then it's many rows of [next_state_index, 40]
+      actions.transpose(0, 1)[:, -istep:], # for each batch, gets the previous actions taken by the agent. First, it's many rows of [0 vector], then it's many rows of [0 vector, 0 vector]
+      rewards.T[:, -istep:], # for each batch, gets the previous rewards of the agent. first it's many rows of [0] (one row for each batch), then it's many rows of [next_reward, 0]
+      )
 
-    # If the episode has ended then we can reset to start a new episode
-    if terminated or truncated:
-        observation, info = env.reset()
+      # Validate input shapes
+      assert (istep < Config.seq_len and inp[0].shape[1] == istep) or \
+            (istep >= Config.seq_len and inp[0].shape[1] == Config.seq_len), \
+            (inp[0].shape[1], istep)
+      
+      print(f"\n====== Step {istep} ========")
+      print(f"Current position: {env.agent_pos}")
+      print(f"Goal position: {env.goal_pos}")
+      print(f"Current observation: {observation}")
+      
+      # Make prediction
+      pred = model(*inp, actions_list=actions_list)   # (num_envs, 1, embed_dim) for our setup
+      pred = pred[:, -1]
+      # print(f"Model prediction shape: {pred.shape}")
 
-    breakpoint()
+      # Choose action from model prediction instead of random 
+      # actions_list expected shape: (num_envs, num_actions, embed_dim)
+      # for single env:
+      pred_embed = pred[0]
+      action_embeds = actions_list[0].to(pred_embed.dtype)
 
-env.close()
+      if Config.sim_measure == "dot":
+          sim = action_embeds @ pred_embed
+      else:
+          sim = torch.nn.functional.cosine_similarity(
+              action_embeds, pred_embed.unsqueeze(0), dim=1
+          )
+
+      action_idx = int(torch.argmax(sim).item())
+      print(f"Selected action index: {action_idx}")
+
+      # Decode and display action (I think im mapping numbers to directions wrong)
+      action_sequence = decode_action(action_idx)
+      move_names = ['no-op', 'down', 'up', 'right', 'left']
+      readable_moves = [move_names[move] for move in action_sequence]
+      print(f"Action sequence: {action_sequence} = {readable_moves}")
+      
+      # Execute action
+      old_pos = env.agent_pos.copy()
+      observation, reward, terminated, truncated, info = env.step(action_idx)
+      new_pos = env.agent_pos.copy()
+      Config.steps += 1
+      
+      Config.total_reward += float(reward)
+      Config.min_reward = min(Config.min_reward, float(reward))
+      Config.max_reward = max(Config.max_reward, float(reward))
+
+      # Baseline: could an optimal action sequence of length action_seq_len hit the goal this step?
+      # Use position at decision time (old_pos), not after stepping.
+      dist = Config.manhattan(old_pos, env.goal_pos)
+      best_possible = 1.0 if dist <= action_seq_len else 0.0
+
+      step_regret = best_possible - float(reward)
+      Config.total_regret += step_regret
+
+      print(f"Position change: {old_pos} -> {new_pos}")
+      print(f"Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
+      
+      if np.array_equal(old_pos, new_pos):
+          print("WARNING: Agent didn't move!")
+      
+      # Record step
+      traj.append(env.agent_pos)
+
+      # Update rolling histories
+      states = torch.roll(states, shifts=-1, dims=0)
+      states[-1, 0] = torch.as_tensor(observation, device=Config.device, dtype=torch.long)
+
+      actions = torch.roll(actions, shifts=-1, dims=0)
+      actions[-1, 0, :] = action_embeds[action_idx].to(actions.dtype)
+
+      rewards = torch.roll(rewards, shifts=-1, dims=0)
+      rewards[-1, 0] = torch.as_tensor(reward, device=Config.device, dtype=torch.long)
+
+      if terminated or truncated:
+          print(f"Episode completed after {istep} steps!")
+
+          # save npy + PNG for THIS episode
+          save_trajectory(
+              agent_positions=traj,                    # list of (2,) arrays
+              goal_pos=env.goal_pos.copy(),
+              size=int(env.size),
+              save_path=str(out_dir / f"agent_traj_ep{ep:03d}.npy"),
+              save_png=True,                           # writes agent_traj_epXXX.png next to it
+          )
+
+          # optional: a tiny text summary per episode
+          with open(out_dir / f"agent_traj_ep{ep:03d}_README.txt", "w") as f:
+              f.write(
+                  f"steps={istep}\n"
+                  f"start={traj[0].tolist()} end={traj[-1].tolist()}\n"
+                  f"goal={env.goal_pos.tolist()}\n"
+              )
+
+          # now reset for the next episode
+          observation, info = env.reset()
+
+          # reset rolling histories...
+          states = torch.roll(states, shifts=-1, dims=0)
+          states[-1, 0] = torch.as_tensor(observation, device=Config.device, dtype=torch.long)
+          actions = torch.roll(actions, shifts=-1, dims=0); actions[-1, 0, :].zero_()
+          rewards = torch.roll(rewards, shifts=-1, dims=0); rewards[-1, 0] = 0
+          break
+
+  plt.show()
+  env.close()
+
+if Config.steps > 0:
+    avg_reward = Config.total_reward / Config.steps
+    avg_return = avg_reward                # same in this setup
+    avg_regret = Config.total_regret / Config.steps
+    print("\n=== Final metrics ===")
+    print(f"steps={Config.steps}")
+    print(f"avg_return={avg_return:.4f}")
+    print(f"avg_reward={avg_reward:.4f}")
+    print(f"avg_regret={avg_regret:.4f}")
+    print(f"avg_total_regret={Config.total_regret:.2f}")
+    print(f"avg_min_reward={Config.min_reward:.1f}")
+    print(f"avg_max_reward={Config.max_reward:.1f}")
+else:
+    print("No steps executed; no metrics to report.")
+
 
 traj = np.vstack(traj) # stack positions. Index with traj[i] to get (x,y) pos at timestep i
 print(traj)
+out_dir = Path("eval_trajs")
+out_dir.mkdir(parents=True, exist_ok=True)
 
-save_path = Path(Config.save_dir+"/eval_traj")
-np.save(save_path, traj)
+raw_path = out_dir / f"agent_traj_ep{ep}.npy"
+readme_path = out_dir / f"agent_traj_ep{ep}_README.txt"
 
-
-
-
+traj = np.vstack(traj).astype(np.int32)
+np.save(raw_path, traj)
 
 
 """locals():
